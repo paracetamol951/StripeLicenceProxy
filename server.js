@@ -234,7 +234,7 @@ app.post("/stripe/create-portal-session", checkInternalAuth, async (req, res) =>
 
         const session = await stripe.billingPortal.sessions.create({
             customer: stripe_customer_id,
-            return_url: return_url || `${process.env.APP_URL}/billing.php`,
+            return_url: return_url || `${process.env.APP_URL}/`,
         });
 
         res.json({
