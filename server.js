@@ -19,7 +19,7 @@ function checkInternalAuth(req, res, next) {
 
     next();
 }
-
+/*
 async function notifyKash(action, payload) {
     const response = await fetch(process.env.KASH_INTERNAL_API_URL, {
         method: "POST",
@@ -38,12 +38,209 @@ async function notifyKash(action, payload) {
     if (!response.ok) {
         throw new Error(`Kash API error ${response.status}: ${text}`);
     }
+    console.log("kash response", text);
 
     try {
         return JSON.parse(text);
     } catch {
         return { raw: text };
     }
+}*/
+
+async function notifyInternal(url, key, action, payload) {
+    console.log("notifyInternal", url, action);
+    const response = await fetch(url, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "X-Internal-Key": key,
+        },
+        body: JSON.stringify({ action, payload }),
+    });
+
+    const text = await response.text();
+
+    if (!response.ok) {
+        throw new Error(`Internal API error ${response.status}: ${text}`);
+    }
+    console.log("rrrr",url, action, text);
+    try {
+        return JSON.parse(text);
+    } catch {
+        return { raw: text };
+    }
+} const testP = {
+    id: 'in_1TuX6r389UanmShJPwk1ZTuZ',
+    object: 'invoice',
+    account_country: 'FR',
+    account_name: 'Net-assembly sandbox',
+    account_tax_ids: null,
+    amount_due: 400,
+    amount_overpaid: 0,
+    amount_paid: 400,
+    amount_remaining: 0,
+    amount_shipping: 0,
+    application: null,
+    attempt_count: 0,
+    attempted: true,
+    auto_advance: false,
+
+    automatic_tax: {
+        disabled_reason: null,
+        enabled: false,
+        liability: null,
+        provider: null,
+        status: null
+    },
+
+    automatically_finalizes_at: null,
+    billing_reason: 'subscription_create',
+    collection_method: 'charge_automatically',
+    created: 1784376768,
+    currency: 'eur',
+    custom_fields: null,
+    customer: 'cus_UuLohvBJ50d54J',
+    customer_account: 'acct_1TuX6q389UhgZyP5',
+
+    customer_address: {
+        city: null,
+        country: 'FR',
+        line1: null,
+        line2: null,
+        postal_code: null,
+        state: null
+    },
+
+    customer_email: 'qsdqsdggg@gmail.com',
+    customer_name: 'sdfsdf',
+    customer_phone: null,
+    customer_shipping: null,
+    customer_tax_exempt: 'none',
+    customer_tax_ids: [],
+    default_payment_method: null,
+    default_source: null,
+    default_tax_rates: [],
+    description: null,
+    discounts: [],
+    due_date: null,
+    effective_at: 1784376768,
+    ending_balance: 0,
+    footer: null,
+    from_invoice: null,
+
+    hosted_invoice_url:
+        'https://invoice.stripe.com/i/acct_1SAMeM389UanmShJ/test_YWNjdF8xU0FNZU0zODlVYW5tU2hKLF9VdUxvRVpOSDdIWk5ESTFSSENzMnVwVUlDQm5iZ3FmLDE3NDkxNzU3Mg0200PVW93HeY?s=ap',
+
+    invoice_pdf:
+        'https://pay.stripe.com/invoice/acct_1SAMeM389UanmShJ/test_YWNjdF8xU0FNZU0zODlVYW5tU2hKLF9VdUxvRVpOSDdIWk5ESTFSSENzMnVwVUlDQm5iZ3FmLDE3NDkxNzU3Mg0200PVW93HeY/pdf?s=ap',
+
+    issuer: {
+        type: 'self'
+    },
+
+    last_finalization_error: null,
+    latest_revision: null,
+
+    lines: {
+        object: 'list',
+        data: [
+            {
+                // Mets ici le véritable contenu de la ligne Stripe.
+            }
+        ],
+        has_more: false,
+        total_count: 1,
+        url: '/v1/invoices/in_1TuX6r389UanmShJPwk1ZTuZ/lines'
+    },
+
+    livemode: false,
+    metadata: {},
+    next_payment_attempt: null,
+    number: 'YBHBZJRY-0048',
+    on_behalf_of: null,
+
+    parent: {
+        quote_details: null,
+        subscription_details: {
+            metadata: {},
+            subscription: 'sub_1TuX6s389UanmShJF4mVFEvN'
+        },
+        type: 'subscription_details'
+    },
+
+    payment_settings: {
+        default_mandate: null,
+        payment_method_options: {
+            acss_debit: null,
+            bancontact: null,
+            card: {},
+            customer_balance: null,
+            konbini: null,
+            payto: null,
+            pix: null,
+            sepa_debit: null,
+            upi: null,
+            us_bank_account: null
+        },
+        payment_method_types: null
+    },
+
+    period_end: 1784376768,
+    period_start: 1784376768,
+    post_payment_credit_notes_amount: 0,
+    pre_payment_credit_notes_amount: 0,
+    receipt_number: null,
+    rendering: null,
+    shipping_cost: null,
+    shipping_details: null,
+    starting_balance: 0,
+    statement_descriptor: null,
+    status: 'paid',
+
+    status_transitions: {
+        finalized_at: 1784376768,
+        marked_uncollectible_at: null,
+        paid_at: 1784376769,
+        voided_at: null
+    },
+
+    subtotal: 400,
+    subtotal_excluding_tax: 400,
+    test_clock: null,
+    total: 400,
+    total_discount_amounts: [],
+    total_excluding_tax: 400,
+    total_pretax_credit_amounts: [],
+    total_taxes: [],
+    webhooks_delivered_at: 1784376768
+};
+
+handleInvoicePaid(testP);
+
+async function notifyKash(action, payload) {
+    return notifyInternal(
+        process.env.KASH_INTERNAL_API_URL,
+        process.env.KASH_INTERNAL_API_KEY,
+        action,
+        payload
+    );
+}
+
+async function notifyTarot(action, payload) {
+    return notifyInternal(
+        process.env.TAROT_INTERNAL_API_URL,
+        process.env.TAROT_INTERNAL_API_KEY,
+        action,
+        payload
+    );
+}
+
+async function notifyProject(action, payload) {
+    if (payload && payload.shop_id === "tarot") {
+        return notifyTarot(action, payload);
+    }
+
+    return notifyKash(action, payload);
 }
 
 
@@ -62,32 +259,33 @@ app.post(
         } catch (err) {
             console.error("Webhook signature error:", err.message);
             return res.status(400).send(`Webhook Error: ${err.message}`);
-        }
-        //console.log("received webhook", event);
+        } 
+        console.log("received webhook " + event.type, event);
+        var resF = "NOOO";
         try {
             switch (event.type) {
                 case "checkout.session.completed":
-                    await handleCheckoutCompleted(event.data.object);
+                    resF = await handleCheckoutCompleted(event.data.object);
                     break;
 
                 case "customer.subscription.created":
                 case "customer.subscription.updated":
-                    await handleSubscriptionUpdated(event.data.object);
+                    resF = await handleSubscriptionUpdated(event.data.object);
                     break;
 
                 case "customer.subscription.deleted":
-                    await handleSubscriptionDeleted(event.data.object);
+                    resF = await handleSubscriptionDeleted(event.data.object);
                     break;
 
                 case "invoice.paid":
-                    await handleInvoicePaid(event.data.object);
+                    resF = await handleInvoicePaid(event.data.object);
                     break;
 
                 case "invoice.payment_failed":
-                    await handleInvoicePaymentFailed(event.data.object);
+                    resF = await handleInvoicePaymentFailed(event.data.object);
                     break;
             }
-
+            console.log("webhook result" + event.type, resF);
             res.json({ received: true });
         } catch (err) {
             console.error("Webhook handling error:", err);
@@ -177,41 +375,35 @@ app.post("/stripe/create-checkout-session", checkInternalAuth, async (req, res) 
             email,
             stripe_price_id,
             plan_code,
-            billing_period
+            billing_period,
+            monthly_credits_premium,
+            success_url,
+            cancel_url,
         } = req.body;
 
         if (!user_id || !shop_id || !email || !stripe_price_id) {
             return res.status(400).json({ error: "Missing parameters" });
         }
 
+        const metadata = {
+            user_id: String(user_id),
+            shop_id: String(shop_id),
+            plan_code: plan_code || "",
+            billing_period: billing_period || "",
+            stripe_price_id,
+            monthly_credits_premium: String(monthly_credits_premium || ""),
+        };
+
         const session = await stripe.checkout.sessions.create({
             mode: "subscription",
             customer_email: email,
-            line_items: [
-                {
-                    price: stripe_price_id,
-                    quantity: 1,
-                },
-            ],
-            success_url: `${process.env.APP_URL}/?stripe-success=1&session_id={CHECKOUT_SESSION_ID}`,
-            cancel_url: `${process.env.APP_URL}/?stripe-cancel=1`,
-            metadata: {
-                user_id: String(user_id),
-                shop_id: String(shop_id),
-                plan_code: plan_code || "",
-                billing_period: billing_period || "",
-                stripe_price_id: stripe_price_id,
-            },
-            subscription_data: {
-                metadata: {
-                    user_id: String(user_id),
-                    shop_id: String(shop_id),
-                    plan_code: plan_code || "",
-                    billing_period: billing_period || "",
-                    stripe_price_id: stripe_price_id,
-                },
-            },
+            line_items: [{ price: stripe_price_id, quantity: 1 }],
+            success_url: success_url || `${process.env.APP_URL}/?stripe-success=1&session_id={CHECKOUT_SESSION_ID}`,
+            cancel_url: cancel_url || `${process.env.APP_URL}/?stripe-cancel=1`,
+            metadata,
+            subscription_data: { metadata },
         });
+
 
         res.json({
             checkout_url: session.url,
@@ -219,7 +411,7 @@ app.post("/stripe/create-checkout-session", checkInternalAuth, async (req, res) 
         });
     } catch (err) {
         console.error("Create checkout error:", err);
-        res.status(500).json({ error: "Unable to create checkout session" });
+        res.status(500).json({ error: "Unable to create checkout session",err });
     }
 });
 
@@ -270,7 +462,7 @@ app.post("/stripe/subscription-status", checkInternalAuth, async (req, res) => {
 
 
 async function handleCheckoutCompleted(session) {
-    const res = await notifyKash("checkout_completed", {
+    const res = await notifyProject("checkout_completed", {
         stripe_checkout_session_id: session.id,
         stripe_customer_id: session.customer,
         stripe_subscription_id: session.subscription,
@@ -285,6 +477,7 @@ async function handleCheckoutCompleted(session) {
         payment_status: session.payment_status,
     });
     console.log('handleCheckoutCompleted', res);
+    return res;
 }
 async function handleSubscriptionUpdated(subscription) {
     const sub = await stripe.subscriptions.retrieve(subscription.id, {
@@ -298,8 +491,8 @@ async function handleSubscriptionUpdated(subscription) {
 
     const priceId = item && item.price ? item.price.id : null;
 
-    const currentPeriodStart = item ? item.current_period_start : null;
-    const currentPeriodEnd = item ? item.current_period_end : null;
+    const currentPeriodStart = sub.current_period_start || (item ? item.current_period_start : null);
+    const currentPeriodEnd = sub.current_period_end || (item ? item.current_period_end : null);
 
     const payload = {
         stripe_subscription_id: sub.id,
@@ -323,12 +516,13 @@ async function handleSubscriptionUpdated(subscription) {
 
     //console.log("handleSubscriptionUpdated", payload);
 
-    const res = await notifyKash("subscription_updated", payload);
+    const res = await notifyProject("subscription_updated", payload);
     console.log('handleSubscriptionUpdated', res);
+    return res;
 }
 
 async function handleSubscriptionDeleted(subscription) {
-    const res = await notifyKash("subscription_deleted", {
+    const res = await notifyProject("subscription_deleted", {
         stripe_subscription_id: subscription.id,
         stripe_customer_id: subscription.customer,
         user_id: subscription.metadata?.user_id,
@@ -337,13 +531,79 @@ async function handleSubscriptionDeleted(subscription) {
         canceled_at: subscription.canceled_at,
     });
     console.log('handleSubscriptionDeleted', res);
+    return res;
 }
 
+
 async function handleInvoicePaid(invoice) {
-    const res = await notifyKash("invoice_paid", {
+    const subscriptionId =
+        invoice.parent?.subscription_details?.subscription ||
+        invoice.subscription ||
+        invoice.subscription_details?.subscription ||
+        null;
+
+    const invoiceSubscriptionMetadata =
+        invoice.parent?.subscription_details?.metadata || {};
+
+    let subscription = null;
+
+    if (subscriptionId) {
+        subscription = await stripe.subscriptions.retrieve(subscriptionId, {
+            expand: ["items.data.price"]
+        });
+    }
+
+    const metadata = {
+        ...(subscription?.metadata || {}),
+        ...invoiceSubscriptionMetadata
+    };
+
+    const priceId =
+        subscription?.items?.data?.[0]?.price?.id ||
+        invoice.lines?.data?.[0]?.pricing?.price_details?.price ||
+        invoice.lines?.data?.[0]?.price?.id ||
+        null;
+
+    if (!metadata.shop_id && priceId === process.env.TAROT_VIP_STRIPE_PRICE_ID) {
+        metadata.shop_id = "tarot";
+    }
+
+    const payload = {
         stripe_invoice_id: invoice.id,
         stripe_customer_id: invoice.customer,
-        stripe_subscription_id: invoice.parent.subscription_details.subscription,
+        stripe_subscription_id: subscriptionId,
+
+        user_id: metadata.user_id || null,
+        shop_id: metadata.shop_id || null,
+
+        plan_code: metadata.plan_code || null,
+        billing_period: metadata.billing_period || null,
+        stripe_price_id: metadata.stripe_price_id || priceId,
+        monthly_credits_premium: metadata.monthly_credits_premium || null,
+
+        amount_paid: invoice.amount_paid,
+        currency: invoice.currency,
+        status: invoice.status,
+        hosted_invoice_url: invoice.hosted_invoice_url,
+        invoice_pdf: invoice.invoice_pdf,
+    };
+
+    const res = await notifyProject("invoice_paid", payload);
+    console.log("handleInvoicePaid", res, payload);
+}
+
+/*
+
+async function handleInvoicePaid(invoice) {
+    const subscriptionId =
+        invoice.subscription ||
+        invoice.parent?.subscription_details?.subscription ||
+        invoice.subscription_details?.subscription;
+
+    const res = await notifyProject("invoice_paid", {
+        stripe_invoice_id: invoice.id,
+        stripe_customer_id: invoice.customer,
+        stripe_subscription_id: subscriptionId,
         amount_paid: invoice.amount_paid,
         currency: invoice.currency,
         status: invoice.status,
@@ -351,10 +611,11 @@ async function handleInvoicePaid(invoice) {
         invoice_pdf: invoice.invoice_pdf,
     });
     console.log('handleInvoicePaid', res, invoice);
-}
+    return res;
+}*/
 
 async function handleInvoicePaymentFailed(invoice) {
-    const res = await notifyKash("invoice_payment_failed", {
+    const res = await notifyProject("invoice_payment_failed", {
         stripe_invoice_id: invoice.id,
         stripe_customer_id: invoice.customer,
         stripe_subscription_id: invoice.subscription,
@@ -364,6 +625,7 @@ async function handleInvoicePaymentFailed(invoice) {
         hosted_invoice_url: invoice.hosted_invoice_url,
     });
     console.log('handleInvoicePaymentFailed', res);
+    return res;
 }
 
 app.listen(process.env.PORT, () => {
