@@ -63,14 +63,13 @@ async function notifyInternal(url, key, action, payload) {
     if (!response.ok) {
         throw new Error(`Internal API error ${response.status}: ${text}`);
     }
-    console.log("rrrr",url, action, text);
+    console.log("rrrr", url, action, text);
     try {
         return JSON.parse(text);
     } catch {
         return { raw: text };
     }
-} 
-
+}
 
 async function notifyKash(action, payload) {
     return notifyInternal(
@@ -90,14 +89,78 @@ async function notifyTarot(action, payload) {
     );
 }
 
-async function notifyProject(action, payload) {
-    if (payload && payload.shop_id === "tarot") {
-        return notifyTarot(action, payload);
+async function notifyProject(action, payload, event) {
+    const eventPayload = withStripeEvent(payload, event);
+
+    if (eventPayload && eventPayload.shop_id === "tarot") {
+        return notifyTarot(action, eventPayload);
     }
 
-    return notifyKash(action, payload);
+    return notifyKash(action, eventPayload);
 }
 
+
+function withStripeEvent(payload, event) {
+    return {
+        ...payload,
+        stripe_event_id: event.id,
+        stripe_event_type: event.type,
+        stripe_event_created: event.created,
+    };
+}
+
+function getInvoiceSubscriptionId(invoice) {
+    return (
+        invoice.parent?.subscription_details?.subscription ||
+        invoice.subscription ||
+        invoice.subscription_details?.subscription ||
+        null
+    );
+}
+
+function serializeSubscriptionItems(subscription) {
+    const items = subscription?.items?.data || [];
+    return items.map((item) => ({
+        item_id: item.id,
+        price_id: item.price?.id || null,
+        quantity: item.quantity || 0,
+        current_period_start: item.current_period_start || subscription.current_period_start || null,
+        current_period_end: item.current_period_end || subscription.current_period_end || null,
+    }));
+}
+
+function subscriptionPeriod(subscription) {
+    const items = serializeSubscriptionItems(subscription);
+    return {
+        current_period_start: subscription.current_period_start || (items[0] ? items[0].current_period_start : null),
+        current_period_end: subscription.current_period_end || (items[0] ? items[0].current_period_end : null),
+    };
+}
+
+function serializeInvoiceItems(invoice) {
+    const lines = invoice?.lines?.data || [];
+    return lines.map((line) => {
+        const pricingPrice = line.pricing?.price_details?.price || null;
+        return {
+            item_id: line.subscription_item || null,
+            price_id: typeof pricingPrice === "string"
+                ? pricingPrice
+                : (pricingPrice?.id || line.price?.id || null),
+            quantity: line.quantity || 0,
+            current_period_start: line.period?.start || null,
+            current_period_end: line.period?.end || null,
+        };
+    }).filter((item) => item.price_id);
+}
+
+function itemsPeriod(items, fallback) {
+    const starts = items.map((item) => item.current_period_start).filter(Boolean);
+    const ends = items.map((item) => item.current_period_end).filter(Boolean);
+    return {
+        current_period_start: starts.length ? Math.min(...starts) : fallback.current_period_start,
+        current_period_end: ends.length ? Math.max(...ends) : fallback.current_period_end,
+    };
+}
 
 app.post(
     "/stripe/webhook",
@@ -114,30 +177,30 @@ app.post(
         } catch (err) {
             console.error("Webhook signature error:", err.message);
             return res.status(400).send(`Webhook Error: ${err.message}`);
-        } 
+        }
         console.log("received webhook " + event.type, event);
         var resF = "NOOO";
         try {
             switch (event.type) {
                 case "checkout.session.completed":
-                    resF = await handleCheckoutCompleted(event.data.object);
+                    resF = await handleCheckoutCompleted(event.data.object, event);
                     break;
 
                 case "customer.subscription.created":
                 case "customer.subscription.updated":
-                    resF = await handleSubscriptionUpdated(event.data.object);
+                    resF = await handleSubscriptionUpdated(event.data.object, event);
                     break;
 
                 case "customer.subscription.deleted":
-                    resF = await handleSubscriptionDeleted(event.data.object);
+                    resF = await handleSubscriptionDeleted(event.data.object, event);
                     break;
 
                 case "invoice.paid":
-                    resF = await handleInvoicePaid(event.data.object);
+                    resF = await handleInvoicePaid(event.data.object, event);
                     break;
 
                 case "invoice.payment_failed":
-                    resF = await handleInvoicePaymentFailed(event.data.object);
+                    resF = await handleInvoicePaymentFailed(event.data.object, event);
                     break;
             }
             console.log("webhook result" + event.type, resF);
@@ -228,6 +291,7 @@ app.post("/stripe/create-checkout-session", checkInternalAuth, async (req, res) 
             user_id,
             shop_id,
             email,
+            stripe_customer_id,
             stripe_price_id,
             plan_code,
             billing_period,
@@ -249,15 +313,22 @@ app.post("/stripe/create-checkout-session", checkInternalAuth, async (req, res) 
             monthly_credits_premium: String(monthly_credits_premium || ""),
         };
 
-        const session = await stripe.checkout.sessions.create({
+        const sessionParams = {
             mode: "subscription",
-            customer_email: email,
             line_items: [{ price: stripe_price_id, quantity: 1 }],
             success_url: success_url || `${process.env.APP_URL}/?stripe-success=1&session_id={CHECKOUT_SESSION_ID}`,
             cancel_url: cancel_url || `${process.env.APP_URL}/?stripe-cancel=1`,
             metadata,
             subscription_data: { metadata },
-        });
+        };
+
+        if (stripe_customer_id) {
+            sessionParams.customer = stripe_customer_id;
+        } else {
+            sessionParams.customer_email = email;
+        }
+
+        const session = await stripe.checkout.sessions.create(sessionParams);
 
 
         res.json({
@@ -266,7 +337,119 @@ app.post("/stripe/create-checkout-session", checkInternalAuth, async (req, res) 
         });
     } catch (err) {
         console.error("Create checkout error:", err);
-        res.status(500).json({ error: "Unable to create checkout session",err });
+        res.status(500).json({ error: "Unable to create checkout session", err });
+    }
+});
+
+app.post("/stripe/create-white-label-checkout-session", checkInternalAuth, async (req, res) => {
+    try {
+        const {
+            white_label_id,
+            email,
+            stripe_customer_id,
+            essential_price_id,
+            premium_price_id,
+            essential_quantity,
+            premium_quantity,
+            success_url,
+            cancel_url,
+        } = req.body;
+
+        const essentialQuantity = Math.max(0, parseInt(essential_quantity, 10) || 0);
+        const premiumQuantity = Math.max(0, parseInt(premium_quantity, 10) || 0);
+        if (!white_label_id || !email || !essential_price_id || !premium_price_id || essentialQuantity + premiumQuantity < 1) {
+            return res.status(400).json({ error: "Missing or invalid parameters" });
+        }
+
+        const lineItems = [];
+        if (essentialQuantity) lineItems.push({ price: essential_price_id, quantity: essentialQuantity });
+        if (premiumQuantity) lineItems.push({ price: premium_price_id, quantity: premiumQuantity });
+        const metadata = {
+            billing_type: "white_label",
+            white_label_id: String(white_label_id),
+        };
+        const sessionParams = {
+            mode: "subscription",
+            line_items: lineItems,
+            success_url: success_url || `${process.env.APP_URL}/?stripe-success=1`,
+            cancel_url: cancel_url || `${process.env.APP_URL}/?stripe-cancel=1`,
+            metadata,
+            subscription_data: { metadata },
+        };
+        if (stripe_customer_id) sessionParams.customer = stripe_customer_id;
+        else sessionParams.customer_email = email;
+
+        const session = await stripe.checkout.sessions.create(sessionParams);
+        res.json({ checkout_url: session.url, session_id: session.id });
+    } catch (err) {
+        console.error("Create white-label checkout error:", err);
+        res.status(500).json({ error: "Unable to create white-label checkout session" });
+    }
+});
+
+app.post("/stripe/sync-white-label-subscription", checkInternalAuth, async (req, res) => {
+    try {
+        const {
+            stripe_subscription_id,
+            essential_price_id,
+            premium_price_id,
+            essential_quantity,
+            premium_quantity,
+        } = req.body;
+        const targets = {};
+        targets[essential_price_id] = Math.max(0, parseInt(essential_quantity, 10) || 0);
+        targets[premium_price_id] = Math.max(0, parseInt(premium_quantity, 10) || 0);
+        if (!stripe_subscription_id || !essential_price_id || !premium_price_id) {
+            return res.status(400).json({ error: "Missing parameters" });
+        }
+
+        let subscription = await stripe.subscriptions.retrieve(stripe_subscription_id, {
+            expand: ["items.data.price"]
+        });
+        const totalQuantity = targets[essential_price_id] + targets[premium_price_id];
+        if (!totalQuantity) {
+            await stripe.subscriptions.update(stripe_subscription_id, {
+                cancel_at_period_end: true,
+                proration_behavior: "none",
+            });
+        } else {
+            const updates = [];
+            const foundPrices = {};
+            for (const item of subscription.items.data) {
+                const priceId = item.price.id;
+                if (!Object.prototype.hasOwnProperty.call(targets, priceId)) continue;
+                foundPrices[priceId] = true;
+                if (targets[priceId] > 0) updates.push({ id: item.id, quantity: targets[priceId] });
+                else updates.push({ id: item.id, deleted: true });
+            }
+            for (const priceId of [essential_price_id, premium_price_id]) {
+                if (!foundPrices[priceId] && targets[priceId] > 0) {
+                    updates.push({ price: priceId, quantity: targets[priceId] });
+                }
+            }
+            await stripe.subscriptions.update(stripe_subscription_id, {
+                cancel_at_period_end: false,
+                proration_behavior: "none",
+                items: updates,
+            });
+        }
+        subscription = await stripe.subscriptions.retrieve(stripe_subscription_id, {
+            expand: ["items.data.price"]
+        });
+
+        const period = subscriptionPeriod(subscription);
+        res.json({
+            success: true,
+            subscription_id: subscription.id,
+            status: subscription.status,
+            cancel_at_period_end: subscription.cancel_at_period_end,
+            current_period_start: period.current_period_start,
+            current_period_end: period.current_period_end,
+            subscription_items: serializeSubscriptionItems(subscription),
+        });
+    } catch (err) {
+        console.error("Sync white-label subscription error:", err);
+        res.status(500).json({ error: "Unable to synchronize white-label subscription" });
     }
 });
 
@@ -316,7 +499,7 @@ app.post("/stripe/subscription-status", checkInternalAuth, async (req, res) => {
 });
 
 
-async function handleCheckoutCompleted(session) {
+async function handleCheckoutCompleted(session, event) {
     const res = await notifyProject("checkout_completed", {
         stripe_checkout_session_id: session.id,
         stripe_customer_id: session.customer,
@@ -329,12 +512,15 @@ async function handleCheckoutCompleted(session) {
         billing_period: session.metadata ? session.metadata.billing_period : null,
         stripe_price_id: session.metadata ? session.metadata.stripe_price_id : null,
 
+        billing_type: session.metadata ? session.metadata.billing_type : null,
+        white_label_id: session.metadata ? session.metadata.white_label_id : null,
+
         payment_status: session.payment_status,
-    });
+    }, event);
     console.log('handleCheckoutCompleted', res);
     return res;
 }
-async function handleSubscriptionUpdated(subscription) {
+async function handleSubscriptionUpdated(subscription, event) {
     const sub = await stripe.subscriptions.retrieve(subscription.id, {
         expand: ["items.data.price"]
     });
@@ -349,6 +535,7 @@ async function handleSubscriptionUpdated(subscription) {
     const currentPeriodStart = sub.current_period_start || (item ? item.current_period_start : null);
     const currentPeriodEnd = sub.current_period_end || (item ? item.current_period_end : null);
 
+    const period = subscriptionPeriod(sub);
     const payload = {
         stripe_subscription_id: sub.id,
         stripe_customer_id: sub.customer,
@@ -360,10 +547,14 @@ async function handleSubscriptionUpdated(subscription) {
         plan_code: sub.metadata ? sub.metadata.plan_code : null,
         billing_period: sub.metadata ? sub.metadata.billing_period : null,
 
+        billing_type: sub.metadata ? sub.metadata.billing_type : null,
+        white_label_id: sub.metadata ? sub.metadata.white_label_id : null,
+        subscription_items: serializeSubscriptionItems(sub),
+
         status: sub.status,
 
-        current_period_start: currentPeriodStart,
-        current_period_end: currentPeriodEnd,
+        current_period_start: period.current_period_start || currentPeriodStart,
+        current_period_end: period.current_period_end || currentPeriodEnd,
 
         cancel_at_period_end: sub.cancel_at_period_end,
         canceled_at: sub.canceled_at
@@ -371,31 +562,29 @@ async function handleSubscriptionUpdated(subscription) {
 
     //console.log("handleSubscriptionUpdated", payload);
 
-    const res = await notifyProject("subscription_updated", payload);
+    const res = await notifyProject("subscription_updated", payload, event);
     console.log('handleSubscriptionUpdated', res);
     return res;
 }
 
-async function handleSubscriptionDeleted(subscription) {
+async function handleSubscriptionDeleted(subscription, event) {
     const res = await notifyProject("subscription_deleted", {
         stripe_subscription_id: subscription.id,
         stripe_customer_id: subscription.customer,
         user_id: subscription.metadata?.user_id,
         shop_id: subscription.metadata?.shop_id,
+        billing_type: subscription.metadata?.billing_type,
+        white_label_id: subscription.metadata?.white_label_id,
         status: subscription.status,
         canceled_at: subscription.canceled_at,
-    });
+    }, event);
     console.log('handleSubscriptionDeleted', res);
     return res;
 }
 
 
-async function handleInvoicePaid(invoice) {
-    const subscriptionId =
-        invoice.parent?.subscription_details?.subscription ||
-        invoice.subscription ||
-        invoice.subscription_details?.subscription ||
-        null;
+async function handleInvoicePaid(invoice, event) {
+    const subscriptionId = getInvoiceSubscriptionId(invoice);
 
     const invoiceSubscriptionMetadata =
         invoice.parent?.subscription_details?.metadata || {};
@@ -423,6 +612,13 @@ async function handleInvoicePaid(invoice) {
         metadata.shop_id = "tarot";
     }
 
+    const invoiceItems = serializeInvoiceItems(invoice);
+    const subscriptionItems = subscription ? serializeSubscriptionItems(subscription) : [];
+    const invoicePeriod = itemsPeriod(
+        invoiceItems,
+        subscription ? subscriptionPeriod(subscription) : {}
+    );
+
     const payload = {
         stripe_invoice_id: invoice.id,
         stripe_customer_id: invoice.customer,
@@ -436,6 +632,12 @@ async function handleInvoicePaid(invoice) {
         stripe_price_id: metadata.stripe_price_id || priceId,
         monthly_credits_premium: metadata.monthly_credits_premium || null,
 
+        billing_type: metadata.billing_type || null,
+        white_label_id: metadata.white_label_id || null,
+        subscription_items: invoiceItems.length ? invoiceItems : subscriptionItems,
+        current_period_start: invoicePeriod.current_period_start || null,
+        current_period_end: invoicePeriod.current_period_end || null,
+
         amount_paid: invoice.amount_paid,
         currency: invoice.currency,
         status: invoice.status,
@@ -443,8 +645,9 @@ async function handleInvoicePaid(invoice) {
         invoice_pdf: invoice.invoice_pdf,
     };
 
-    const res = await notifyProject("invoice_paid", payload);
+    const res = await notifyProject("invoice_paid", payload, event);
     console.log("handleInvoicePaid", res, payload);
+    return res;
 }
 
 /*
@@ -469,16 +672,32 @@ async function handleInvoicePaid(invoice) {
     return res;
 }*/
 
-async function handleInvoicePaymentFailed(invoice) {
+async function handleInvoicePaymentFailed(invoice, event) {
+    const subscriptionId = getInvoiceSubscriptionId(invoice);
+    let subscription = null;
+    if (subscriptionId) {
+        subscription = await stripe.subscriptions.retrieve(subscriptionId, {
+            expand: ["items.data.price"]
+        });
+    }
+    const metadata = subscription?.metadata || invoice.parent?.subscription_details?.metadata || {};
+    const invoiceItems = serializeInvoiceItems(invoice);
+    const subscriptionItems = subscription ? serializeSubscriptionItems(subscription) : [];
+    const period = itemsPeriod(invoiceItems, subscription ? subscriptionPeriod(subscription) : {});
     const res = await notifyProject("invoice_payment_failed", {
         stripe_invoice_id: invoice.id,
         stripe_customer_id: invoice.customer,
-        stripe_subscription_id: invoice.subscription,
+        stripe_subscription_id: subscriptionId,
+        billing_type: metadata.billing_type || null,
+        white_label_id: metadata.white_label_id || null,
+        subscription_items: invoiceItems.length ? invoiceItems : subscriptionItems,
+        current_period_start: period.current_period_start || null,
+        current_period_end: period.current_period_end || null,
         amount_due: invoice.amount_due,
         currency: invoice.currency,
         status: invoice.status,
         hosted_invoice_url: invoice.hosted_invoice_url,
-    });
+    }, event);
     console.log('handleInvoicePaymentFailed', res);
     return res;
 }
