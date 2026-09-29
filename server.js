@@ -3,6 +3,62 @@ require("dotenv").config();
 const express = require("express");
 const Stripe = require("stripe");
 const cors = require("cors");
+// A 2xx transport response is not enough: both PHP receivers must acknowledge
+// the application operation. The timeout also covers reading the response body.
+async function postInternal(url, key, action, payload, options = {}) {
+    if (!url || !key) throw new Error("Internal API configuration missing");
+    const timeoutMs = options.timeoutMs === undefined ? 10000 : options.timeoutMs;
+    const fetchImpl = options.fetchImpl || fetch;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const response = await fetchImpl(url, {
+            method: "POST",
+            redirect: "error",
+            signal: controller.signal,
+            headers: { "Content-Type": "application/json", "X-Internal-Key": key },
+            body: JSON.stringify({ action, payload }),
+        });
+        if (!response.ok) throw new Error("Internal API HTTP " + response.status);
+        if (response.redirected) throw new Error("Internal API unexpected redirect");
+        const body = await response.text();
+        let result;
+        try { result = JSON.parse(body); }
+        catch (_) { throw new Error("Internal API invalid JSON response"); }
+        if (!result || typeof result !== "object" || Array.isArray(result)
+            || result.ok === false || result.success === false
+            || (result.ok !== true && result.success !== true)) {
+            throw new Error("Internal API did not confirm processing");
+        }
+        return result;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+function projectFor(payload) {
+    const shop = String(payload.shop_id || "");
+    const white = String(payload.white_label_id || "");
+    if (shop === "tarot" && !white) return "tarot";
+    if (/^[1-9][0-9]*$/.test(shop) || (!shop && /^[1-9][0-9]*$/.test(white))) return "kash";
+    return null;
+}
+async function resolveProject(payload, retrieve, tarotPriceId) {
+    let resolved = { ...payload };
+    let project = projectFor(resolved);
+    if (!project && resolved.stripe_subscription_id) {
+        const sub = await retrieve(resolved.stripe_subscription_id);
+        for (const field of ["shop_id", "white_label_id", "billing_type", "user_id"]) {
+            if (!resolved[field] && sub.metadata?.[field]) resolved[field] = sub.metadata[field];
+        }
+        if (!resolved.shop_id && tarotPriceId && sub.items?.data?.some(item => item.price?.id === tarotPriceId)) {
+            resolved.shop_id = "tarot";
+        }
+        project = projectFor(resolved);
+    }
+    if (!project) throw new Error("Stripe project routing metadata missing or ambiguous");
+    return { project, payload: resolved };
+}
 
 const app = express();
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
@@ -48,27 +104,9 @@ async function notifyKash(action, payload) {
 }*/
 
 async function notifyInternal(url, key, action, payload) {
-    console.log("notifyInternal", url, action);
-    const response = await fetch(url, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "X-Internal-Key": key,
-        },
-        body: JSON.stringify({ action, payload }),
-    });
-
-    const text = await response.text();
-
-    if (!response.ok) {
-        throw new Error(`Internal API error ${response.status}: ${text}`);
-    }
-    console.log("rrrr", url, action, text);
-    try {
-        return JSON.parse(text);
-    } catch {
-        return { raw: text };
-    }
+    const result = await postInternal(url, key, action, payload);
+    console.log("Internal API acknowledged", action, payload.stripe_event_id || "", url);
+    return result;
 }
 
 async function notifyKash(action, payload) {
@@ -91,12 +129,12 @@ async function notifyTarot(action, payload) {
 
 async function notifyProject(action, payload, event) {
     const eventPayload = withStripeEvent(payload, event);
-
-    if (eventPayload && eventPayload.shop_id === "tarot") {
-        return notifyTarot(action, eventPayload);
-    }
-
-    return notifyKash(action, eventPayload);
+    const route = await resolveProject(eventPayload,
+        id => stripe.subscriptions.retrieve(id, { expand: ["items.data.price"] }),
+        process.env.TAROT_VIP_STRIPE_PRICE_ID);
+    return route.project === "tarot"
+        ? notifyTarot(action, route.payload)
+        : notifyKash(action, route.payload);
 }
 
 
@@ -476,6 +514,41 @@ app.post("/stripe/create-portal-session", checkInternalAuth, async (req, res) =>
     }
 });
 
+// PHP calls this while holding its account lock, so a delayed event applies
+// Stripe's current subscription state rather than an obsolete event snapshot.
+app.post("/stripe/subscription-state", checkInternalAuth, async (req, res) => {
+    try {
+        const id = req.body.stripe_subscription_id;
+        if (typeof id !== "string" || !/^sub_[A-Za-z0-9]+$/.test(id)) {
+            return res.status(400).json({ error: "Invalid subscription id" });
+        }
+        const sub = await stripe.subscriptions.retrieve(id, { expand: ["items.data.price"] },
+            { timeout: 5000, maxNetworkRetries: 0 });
+        const period = subscriptionPeriod(sub);
+        const item = sub.items?.data?.[0];
+        res.json({ success: true, subscription: {
+            stripe_subscription_id: sub.id,
+            stripe_customer_id: typeof sub.customer === "string" ? sub.customer : sub.customer?.id,
+            stripe_price_id: item?.price?.id || null,
+            user_id: sub.metadata?.user_id || null,
+            shop_id: sub.metadata?.shop_id || null,
+            white_label_id: sub.metadata?.white_label_id || null,
+            billing_type: sub.metadata?.billing_type || null,
+            plan_code: sub.metadata?.plan_code || null,
+            billing_period: sub.metadata?.billing_period || null,
+            status: sub.status,
+            current_period_start: period.current_period_start,
+            current_period_end: period.current_period_end,
+            cancel_at_period_end: sub.cancel_at_period_end,
+            latest_invoice: typeof sub.latest_invoice === "string" ? sub.latest_invoice : sub.latest_invoice?.id,
+            subscription_items: serializeSubscriptionItems(sub),
+        }});
+    } catch (err) {
+        console.error("Subscription state lookup failed:", err.message);
+        res.status(503).json({ error: "Subscription state unavailable" });
+    }
+});
+
 app.post("/stripe/subscription-status", checkInternalAuth, async (req, res) => {
     try {
         const { stripe_subscription_id } = req.body;
@@ -680,7 +753,11 @@ async function handleInvoicePaymentFailed(invoice, event) {
             expand: ["items.data.price"]
         });
     }
-    const metadata = subscription?.metadata || invoice.parent?.subscription_details?.metadata || {};
+    const metadata = {
+        ...(subscription?.metadata || {}),
+        ...(invoice.subscription_details?.metadata || {}),
+        ...(invoice.parent?.subscription_details?.metadata || {})
+    };
     const invoiceItems = serializeInvoiceItems(invoice);
     const subscriptionItems = subscription ? serializeSubscriptionItems(subscription) : [];
     const period = itemsPeriod(invoiceItems, subscription ? subscriptionPeriod(subscription) : {});
@@ -688,6 +765,8 @@ async function handleInvoicePaymentFailed(invoice, event) {
         stripe_invoice_id: invoice.id,
         stripe_customer_id: invoice.customer,
         stripe_subscription_id: subscriptionId,
+        shop_id: metadata.shop_id || null,
+        user_id: metadata.user_id || null,
         billing_type: metadata.billing_type || null,
         white_label_id: metadata.white_label_id || null,
         subscription_items: invoiceItems.length ? invoiceItems : subscriptionItems,

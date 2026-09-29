@@ -4,5 +4,8 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "stripe": "^22.2.0"
+  },
+  "scripts": {
+    "test": "node --test"
   }
 }
